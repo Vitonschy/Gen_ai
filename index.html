@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Touching Sounds</title>
-  <script defer src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script defer src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <style>
     :root {
@@ -520,7 +520,9 @@
       }
 
       function setupHostConnection(connection) {
-        connection.on("open", () => {
+        const registerPlayer = () => {
+          if (host.players.has(connection.peer)) return host.players.get(connection.peer);
+
           host.playerCount++;
           const assignedRow = (host.playerCount - 1) % ROWS;
           const colorIndex = (host.playerCount - 1) % PALETTE.length;
@@ -536,19 +538,42 @@
           host.players.set(connection.peer, player);
           setStatus("computer", "connected", "CONNECTED " + host.connections.size);
           renderRoster();
+          return player;
+        };
+
+        const welcomePlayer = () => {
+          if (connection.open !== true) return;
+          const player = registerPlayer();
+          if (!player) return;
 
           // This welcome message is the handshake that enables the phone.
-          send(connection, "welcome", {
+          const sent = send(connection, "welcome", {
             player,
             grid: host.grid,
             cols: COLS,
             rows: ROWS,
             bpm: BPM
           });
+          if (!sent) {
+            setTimeout(welcomePlayer, 100);
+          }
           broadcast("players", { players: Array.from(host.players.values()) });
-        });
+        };
+
+        registerPlayer();
+
+        if (connection.open === true) {
+          welcomePlayer();
+        } else {
+          connection.on("open", welcomePlayer);
+        }
 
         listen(connection, message => {
+          if (message.type === "hello" || message.type === "welcome_request") {
+            welcomePlayer();
+            return;
+          }
+
           const player = host.players.get(connection.peer);
           if (!player) return;
 
@@ -728,7 +753,8 @@
         grid: Array.from({ length: ROWS }, () => Array(COLS).fill(null)),
         assignedRow: 0,
         selectedStep: 0,
-        audio: null
+        audio: null,
+        handshakeTimer: null
       };
 
       function initPlayer() {
@@ -755,12 +781,23 @@
 
       function connectToHost() {
         setStatus("phone", "waiting", "CONNECTING");
+        clearInterval(player.handshakeTimer);
+        player.profile = null;
         player.connection = player.peer.connect(joinParam, {
           reliable: true
         });
 
         player.connection.on("open", () => {
           setStatus("phone", "waiting", "WAITING FOR HOST");
+          send(player.connection, "hello");
+          clearInterval(player.handshakeTimer);
+          player.handshakeTimer = setInterval(() => {
+            if (player.profile) {
+              clearInterval(player.handshakeTimer);
+              return;
+            }
+            send(player.connection, "hello");
+          }, 750);
         });
 
         listen(player.connection, message => {
@@ -788,6 +825,7 @@
         player.profile = payload.player;
         player.assignedRow = payload.player.assignedRow;
         player.grid = payload.grid;
+        clearInterval(player.handshakeTimer);
         const palette = PALETTE[player.profile.colorIndex];
 
         document.getElementById("identitySwatch").style.background = palette.color;
@@ -803,6 +841,8 @@
 
       function bindPhoneControls() {
         document.getElementById("phoneReconnect").addEventListener("click", () => {
+          clearInterval(player.handshakeTimer);
+          player.profile = null;
           if (player.connection) player.connection.close();
           createPlayerPeer();
         });
