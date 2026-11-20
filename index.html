@@ -4,7 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Touching Sounds</title>
-  <script defer src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/peerjs@1.5.7/dist/peerjs.min.js"></script>
+  <script defer src="https://unpkg.com/peerjs@1.5.7/dist/peerjs.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <style>
     :root {
@@ -456,6 +457,7 @@
         playerCount: 0,
         step: 0,
         timer: null,
+        peerTimer: null,
         audio: null,
         master: null,
         playing: false
@@ -475,12 +477,23 @@
 
       function createHostPeer() {
         setStatus("computer", "waiting", "WAITING");
+        clearTimeout(host.peerTimer);
         host.peer = new Peer(randomPeerId(), {
+          host: "0.peerjs.com",
+          port: 443,
+          path: "/",
           secure: location.protocol === "https:",
           debug: 1
         });
 
+        host.peerTimer = setTimeout(() => {
+          if (!host.peer?.id) {
+            setStatus("computer", "disconnected", "PEER SERVER TIMEOUT");
+          }
+        }, 15000);
+
         host.peer.on("open", id => {
+          clearTimeout(host.peerTimer);
           const url = new URL(location.href);
           url.search = "";
           url.hash = "";
@@ -504,7 +517,8 @@
         host.peer.on("disconnected", () => setStatus("computer", "disconnected", "DISCONNECTED"));
         host.peer.on("error", error => {
           console.error("Host PeerJS error", error);
-          setStatus("computer", "disconnected", "DISCONNECTED");
+          setStatus("computer", "disconnected",
+            error.type === "network" ? "PEERJS NETWORK ERROR" : "PEER SERVER ERROR");
         });
       }
 
@@ -754,10 +768,18 @@
         assignedRow: 0,
         selectedStep: 0,
         audio: null,
-        handshakeTimer: null
+        handshakeTimer: null,
+        connectionTimer: null,
+        peerTimer: null
       };
 
       function initPlayer() {
+        if (location.protocol === "file:") {
+          setStatus("phone", "disconnected", "UPLOAD TO HTTPS");
+          document.getElementById("phoneNow").textContent =
+            "OPEN THIS PAGE THROUGH HTTPS";
+          return;
+        }
         buildPhoneGrid();
         bindPhoneControls();
         createPlayerPeer();
@@ -765,29 +787,45 @@
 
       function createPlayerPeer() {
         setStatus("phone", "waiting", "CONNECTING");
+        clearTimeout(player.peerTimer);
+        clearTimeout(player.connectionTimer);
         if (player.peer && !player.peer.destroyed) player.peer.destroy();
         player.peer = new Peer(randomPeerId(), {
+          host: "0.peerjs.com",
+          port: 443,
+          path: "/",
           secure: location.protocol === "https:",
           debug: 1
         });
 
         player.peer.on("open", () => connectToHost());
-        player.peer.on("disconnected", () => setStatus("phone", "disconnected", "DISCONNECTED"));
+        player.peer.on("disconnected", () => {
+          setStatus("phone", "disconnected", "PEER LOST");
+        });
         player.peer.on("error", error => {
           console.error("Player PeerJS error", error);
-          setStatus("phone", "disconnected", "DISCONNECTED");
+          setStatus("phone", "disconnected", "CONNECTION FAILED");
         });
+
+        player.peerTimer = setTimeout(() => {
+          if (player.profile) return;
+          setStatus("phone", "disconnected", "HOST NOT FOUND");
+        }, 15000);
       }
 
       function connectToHost() {
         setStatus("phone", "waiting", "CONNECTING");
         clearInterval(player.handshakeTimer);
+        clearTimeout(player.peerTimer);
+        clearTimeout(player.connectionTimer);
         player.profile = null;
         player.connection = player.peer.connect(joinParam, {
           reliable: true
         });
 
         player.connection.on("open", () => {
+          clearTimeout(player.peerTimer);
+          clearTimeout(player.connectionTimer);
           setStatus("phone", "waiting", "WAITING FOR HOST");
           send(player.connection, "hello");
           clearInterval(player.handshakeTimer);
@@ -799,6 +837,12 @@
             send(player.connection, "hello");
           }, 750);
         });
+
+        player.connectionTimer = setTimeout(() => {
+          if (!player.profile && player.connection?.open !== true) {
+            setStatus("phone", "disconnected", "HOST NOT FOUND");
+          }
+        }, 15000);
 
         listen(player.connection, message => {
           if (message.type === "welcome") {
@@ -842,6 +886,8 @@
       function bindPhoneControls() {
         document.getElementById("phoneReconnect").addEventListener("click", () => {
           clearInterval(player.handshakeTimer);
+          clearTimeout(player.peerTimer);
+          clearTimeout(player.connectionTimer);
           player.profile = null;
           if (player.connection) player.connection.close();
           createPlayerPeer();
